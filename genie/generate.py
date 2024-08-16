@@ -19,9 +19,6 @@ sys.path.append(os.getcwd())
 from data import RawTokenDataset
 from genie.st_mask_git import STMaskGIT
 
-STRIDE = 15
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Generates samples (as tokens) from GENIE model. "
                                                  "Optionally visualizes these tokens as GIFs or comics.")
@@ -39,6 +36,9 @@ def parse_args():
     )
     parser.add_argument(
         "--num_prompt_frames", type=int, default=8, help="The number of context frames."
+    )
+    parser.add_argument(
+        "--stride", type=int, default=1, help="Stride of context frames."
     )
     parser.add_argument(
         "--window_size", type=int, default=16,
@@ -67,12 +67,19 @@ def parse_args():
 def main():
     args = parse_args()
     assert args.num_prompt_frames <= args.window_size
-    val_dataset = RawTokenDataset(args.val_data_dir, window_size=args.window_size, stride=STRIDE)
+    val_dataset = RawTokenDataset(args.val_data_dir, window_size=args.window_size, stride=args.stride)
     latent_side_len = val_dataset.metadata["s"]
 
     # Get single example
-    example_THW = val_dataset[args.example_ind]["input_ids"].reshape(1, args.window_size, latent_side_len,
+    example = val_dataset[args.example_ind]
+    example_THW = example["input_ids"].reshape(1, args.window_size, latent_side_len,
                                                                      latent_side_len).to("cuda")
+    # TODO: lang_emb = example["lang_emb"].view(1, -1).to("cuda")
+    import clip
+    model_clip, _ = clip.load('ViT-B/32', device='cuda:0')
+    with torch.no_grad():
+        inst_token = clip.tokenize(["push blue block to right"])
+        lang_emb = model_clip.encode_text(inst_token.cuda()).view(1, -1).float()
 
     # Load the model checkpoint
     model = STMaskGIT.from_pretrained(args.checkpoint_dir).to("cuda")
@@ -90,7 +97,7 @@ def main():
             prompt_THW[:, timestep:] = model.image_mask_token
 
         samples_HW, _ = model.maskgit_generate(
-            prompt_THW, out_t=timestep, maskgit_steps=args.maskgit_steps, temperature=args.temperature,
+            prompt_THW, lang_emb, out_t=timestep, maskgit_steps=args.maskgit_steps, temperature=args.temperature,
         )
 
         samples.append(samples_HW)
@@ -112,10 +119,11 @@ def main():
     outputs.cpu().numpy().astype(np.dtype(val_dataset.metadata["token_dtype"])).tofile(output_dir / "video.bin")
 
     with open(output_dir / "metadata.json", "w") as f:
-        json.dump(vars(args) | val_dataset.metadata | {
+        json.dump(vars(args) | {
             "num_images": outputs.shape[1],
             "h": latent_side_len,
             "w": latent_side_len,
+            "s": latent_side_len,
             "t": args.window_size,
         }, f)
 

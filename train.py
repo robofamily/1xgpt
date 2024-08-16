@@ -92,18 +92,29 @@ def parse_args():
              "will resize embeddings if needed.",
     )
     parser.add_argument(
+        "--resume_from_checkpoint_without_state",
+        type=str,
+        default=None,
+        help="If the training should continue from only the pretrained model in a checkpoint folder.",
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
         help="If the training should continue from a checkpoint folder.",
     )
-
     # Training
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
         default=4,
         help="Batch size (per device) for the training dataloader.",
+    )
+    parser.add_argument(
+        "--per_device_num_workers",
+        type=int,
+        default=4,
+        help="Worker number (per device) for the training dataloader.",
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
@@ -266,11 +277,12 @@ def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval"
     for step, batch in enumerate(dataloader):
         # Note: hardcoding 4 image cap for faster inference on small models
         reshaped_labels = rearrange(batch["labels"][:4], "b (t s) -> b t s", t=window_size).to(accelerator.device)  # `s` is really `(h, w)`
+        lang_emb = batch["lang_emb"][:4]
 
         num_prompt_frames = window_size // 2  # hardcoding half of frames for context
         num_new_tokens = latent_side_len ** 2 * (window_size - num_prompt_frames)
         prompt_input_ids = rearrange(reshaped_labels[:, :num_prompt_frames], "b t s -> b (t s)")
-        outputs = unwrapped_model.generate(input_ids=prompt_input_ids, attention_mask=torch.ones_like(prompt_input_ids),
+        outputs = unwrapped_model.generate(input_ids=prompt_input_ids, lang_emb=lang_emb, attention_mask=torch.ones_like(prompt_input_ids),
                                            max_new_tokens=num_new_tokens, min_new_tokens=num_new_tokens)
         output_tokens = rearrange(outputs, "b (t h w) -> b t h w", t=window_size,
                                   h=latent_side_len, w=latent_side_len)
@@ -444,7 +456,7 @@ def main():
     collate_fn = default_data_collator if args.llama_config is not None else get_maskgit_collator(config)
     train_dataloader = DataLoader(
         train_dataset, shuffle=True, collate_fn=collate_fn,
-        batch_size=args.per_device_train_batch_size, num_workers=4, pin_memory=True,
+        batch_size=args.per_device_train_batch_size, num_workers=args.per_device_num_workers, pin_memory=True,
     )
 
     # Shuffle eval dataset and then set shuffle=False on the dataloader.
@@ -496,6 +508,10 @@ def main():
         logger.info("Enabling gradient checkpointing")
         model.gradient_checkpointing_enable()
         model.config.use_cache = False # incompatible with grad checkpointing
+
+    if args.resume_from_checkpoint_without_state:
+        logger.info(f"resume_from_checkpoint_without_state {args.resume_from_checkpoint_without_state}")
+        model = model.from_pretrained(args.resume_from_checkpoint_without_state)
 
     # Prepare everything with our `accelerator`.
     model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
@@ -654,6 +670,7 @@ def main():
                     "flops": (completed_steps + 1) * experiment_config["FLOPs_per_update_step"],
                     "throughput_examples": experiment_config["effective_batch_size"] / batch_time,
                 }, step=completed_steps)
+            logger.info(f"training loss {avg_train_loss} lr {lr_scheduler.get_last_lr()[0]}")
 
             progress_bar.update(1)
             completed_steps += 1

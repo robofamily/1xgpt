@@ -1,0 +1,14 @@
+accelerate launch train.py \
+--train_data_dir data/train_calvin \
+--val_data_dir data/validation_calvin \
+--genie_config genie/configs/magvit_n32_h8_d256.json \
+--per_device_train_batch_size 12 \
+--per_device_eval_batch_size 4 \
+--num_train_epochs 9 \
+--stride 3 \
+--output_dir data/genie_model \
+--lr_scheduler_type linear \
+--learning_rate 5e-4 \
+--num_warmup_steps 1000 \
+--per_device_num_workers 12 \
+--resume_from_checkpoint_without_state /public/home/muyao/new_1x_train/1xgpt/data/genie_model_stride3_first_train/final_checkpt \

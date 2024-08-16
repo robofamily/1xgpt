@@ -37,6 +37,8 @@ class GenieConfig:
     mlp_drop: float = 0.0
     mlp_bias: bool = True
 
+    lang_emb_dim: int = 512
+
     def save_pretrained(self, json_path):
         with open(json_path, "w") as f:
             json.dump(vars(self), f)

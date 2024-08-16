@@ -46,6 +46,12 @@ class RawTokenDataset(TorchDataset):
         token_dtype = np.dtype(self.metadata.get("token_dtype", "uint32"))
         self.data = np.memmap(video_tokens_path, dtype=token_dtype, mode="r", shape=shape)
         # self.actions = np.memmap(action_tokens_path, dtype=np.uint16, mode="r", shape=(self.metadata["num_images"],))
+        if "lang_emb_dim" in self.metadata:
+            self.use_lang = True
+            self.lang_emb = np.memmap(data_dir / "language_emb.bin", dtype=np.float32, mode="r", shape=(self.metadata["num_images"], self.metadata["lang_emb_dim"]))
+        else:
+            self.use_lang = False
+            self.fake_lang_emb = torch.zeros(512)
 
         if os.path.isfile(segment_ids_path):
             self.segment_ids = np.memmap(
@@ -98,13 +104,21 @@ class RawTokenDataset(TorchDataset):
         x = torch.from_numpy((self.data[start_ind : start_ind + self.video_len + 1 : self.stride]).astype(np.int64))
         x = x.flatten()
 
+        if self.use_lang:
+            ep_idx = self.segment_ids[start_ind]
+            lang_emb = torch.from_numpy(self.lang_emb[ep_idx].astype(np.float32))
+        else:
+            lang_emb = self.fake_lang_emb
+
         attention_mask = torch.ones_like(x)
-        return {
+        out = {
             "input_ids": x,
             "labels": x,
             "attention_mask": attention_mask,
         }
-
+        if self.use_lang:
+            out["lang_emb"] = lang_emb
+        return out
 
 def get_maskgit_collator(config: GenieConfig):
     mask_token_id = config.image_vocab_size
@@ -114,6 +128,7 @@ def get_maskgit_collator(config: GenieConfig):
         # during training, map (z_0, z_1', z_2') -> (null, z_1, z_2)
         # (z_0, z_1') -> (null, z_1) is the diffusion operator on z_1' -> z_1
 
+        lang_emb = torch.stack([ex["lang_emb"] for ex in features])
         input_ids = torch.stack([ex["input_ids"] for ex in features])
         device = input_ids.device
         x_THW = rearrange(input_ids, "b (t h w) -> b t h w", b=len(features), t=config.T,
@@ -163,6 +178,7 @@ def get_maskgit_collator(config: GenieConfig):
 
         return {
             "input_ids": rearrange(x_THW, "b t h w -> b (t h w)"),
+            "lang_emb": lang_emb,
             "labels": rearrange(labels, "b t h w -> b (t h w)"),
         }
 

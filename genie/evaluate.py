@@ -79,7 +79,7 @@ class GenieEvaluator:
         self.device = device
         self.args = args
 
-    def predict_zframe_logits(self, input_ids: torch.LongTensor) -> tuple[torch.LongTensor, torch.FloatTensor]:
+    def predict_zframe_logits(self, input_ids: torch.LongTensor, lang_emb: torch.Tensor) -> tuple[torch.LongTensor, torch.FloatTensor]:
         """
         Conditioned on each prefix: [frame_0], [frame_0, frame_1], ..., [frame_0, frame_1, ... frame_{T-1}],
         predict the tokens in the following frame: [pred_frame_1, pred_frame_2, ..., pred_frame_T].
@@ -102,6 +102,8 @@ class GenieEvaluator:
         """
         inputs_THW = rearrange(input_ids, "b (t h w) -> b t h w", t=WINDOW_SIZE,
                                h=self.args.latent_h, w=self.args.latent_w).to(self.device)
+        lang_emb = lang_emb.to(self.device)
+        
         all_samples = []
         all_logits = []
         for timestep in range(1, WINDOW_SIZE):
@@ -111,7 +113,7 @@ class GenieEvaluator:
 
             # MaskGIT sampling
             samples_HW, factored_logits = self.model.maskgit_generate(
-                inputs_masked, out_t=timestep, maskgit_steps=self.args.maskgit_steps,
+                inputs_masked, lang_emb, out_t=timestep, maskgit_steps=self.args.maskgit_steps,
                 temperature=self.args.temperature,
             )
 
@@ -170,7 +172,7 @@ def main():
                                        h=args.latent_h, w=args.latent_w)
 
         start_time = time.time()
-        samples, factored_logits = evaluator.predict_zframe_logits(batch["input_ids"])
+        samples, factored_logits = evaluator.predict_zframe_logits(batch["input_ids"], batch["lang_emb"])
         frames_per_batch = (WINDOW_SIZE - 1) * batch["input_ids"].size(0)
         metrics["gen_time"].update((time.time() - start_time) / frames_per_batch, batch_size)
 

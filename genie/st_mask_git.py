@@ -50,6 +50,8 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         self.pos_embed_TSC = torch.nn.Parameter(torch.zeros(1, config.T, config.S, config.d_model))
         self.mask_token_id = config.image_vocab_size
 
+        self.lang_encoder = nn.Linear(config.lang_emb_dim, config.d_model)
+
         self.token_embed = FactorizedEmbedding(  # also works for num_factored_vocabs = 1
             factored_vocab_size=config.factored_vocab_size,
             num_factored_vocabs=config.num_factored_vocabs,
@@ -65,6 +67,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
     def generate(
         self,
         input_ids: torch.LongTensor,
+        lang_emb: torch.Tensor,
         attention_mask: torch.LongTensor,
         max_new_tokens: int,
         min_new_tokens: int = None,
@@ -99,6 +102,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
             # could change sampling hparams
             sample_HW, factored_logits = self.maskgit_generate(
                 inputs_masked_THW,
+                lang_emb,
                 timestep,
                 maskgit_steps=maskgit_steps,
                 temperature=temperature
@@ -123,6 +127,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
     def maskgit_generate(
         self,
         prompt_THW: torch.LongTensor,
+        lang_emb: torch.Tensor,
         out_t: int,
         maskgit_steps: int = 1,
         temperature: float = 0.0,
@@ -160,13 +165,13 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         # this will be modified in place on each iteration of this loop
         unmasked = self.init_mask(prompt_THW)
 
-        logits_CTHW = self.compute_logits(prompt_THW)
+        logits_CTHW = self.compute_logits(prompt_THW, lang_emb)
         logits_CHW = logits_CTHW[:, :, out_t]
         orig_logits_CHW = logits_CHW.clone()  # Return these original logits, not logits after partially sampling.
         for step in tqdm(range(maskgit_steps)):
             # Perform a single maskgit step (cosine schedule), updating unmasked in-place
             if step > 0:  # recompute logits with updated prompt
-                logits_CHW = self.compute_logits(prompt_THW)[:, :, out_t]
+                logits_CHW = self.compute_logits(prompt_THW, lang_emb)[:, :, out_t]
 
             factored_logits = rearrange(logits_CHW, "b (num_vocabs vocab_size) h w -> b vocab_size num_vocabs h w",
                                         vocab_size=self.config.factored_vocab_size,
@@ -252,23 +257,23 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         # only optimize on the masked/noised logits?
         return relevant_loss, relevant_acc
 
-    def compute_logits(self, x_THW):
+    def compute_logits(self, x_THW, lang_emb):
         # x_THW is for z0,...,zT while x_targets is z1,...,zT
         x_TS = rearrange(x_THW, "B T H W -> B T (H W)")
         x_TSC = self.token_embed(x_TS)
 
         # additive embeddings, using the same vocab space
-        x_TSC = self.decoder(x_TSC + self.pos_embed_TSC)
+        x_TSC = self.decoder(x_TSC + self.pos_embed_TSC, self.lang_encoder(lang_emb))
         x_next_TSC = self.out_x_proj(x_TSC)
 
         logits_CTHW = rearrange(x_next_TSC, "B T (H W) C -> B C T H W", H=self.h, W=self.w)
         return logits_CTHW
 
-    def forward(self, input_ids, labels):
+    def forward(self, input_ids, lang_emb, labels):
         T, H, W = self.config.T, self.h, self.w
         x_THW = rearrange(input_ids, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
-        logits_CTHW = self.compute_logits(x_THW)
+        logits_CTHW = self.compute_logits(x_THW, lang_emb)
 
         labels = rearrange(labels, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
