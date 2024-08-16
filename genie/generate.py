@@ -1,9 +1,5 @@
 """
-Example usage:
-```
-python genie/generate.py --checkpoint_dir 1x-technologies/GENIE_35M --output_dir data/genie_baseline_generated --example_ind 150  # 150 is cherry-picked
-python visualize.py --token_dir data/genie_baseline_generated
-```
+Example usage: See https://github.com/1x-technologies/1xgpt?tab=readme-ov-file#1x-genie-baseline
 """
 
 import argparse
@@ -36,6 +32,9 @@ def parse_args():
     )
     parser.add_argument(
         "--num_prompt_frames", type=int, default=8, help="The number of context frames."
+    )
+    parser.add_argument(
+        "--lang_inst", type=str, default="", help="If you want to specify the language instruction, instead of using the original one from dataset"
     )
     parser.add_argument(
         "--stride", type=int, default=1, help="Stride of context frames."
@@ -74,12 +73,14 @@ def main():
     example = val_dataset[args.example_ind]
     example_THW = example["input_ids"].reshape(1, args.window_size, latent_side_len,
                                                                      latent_side_len).to("cuda")
-    # TODO: lang_emb = example["lang_emb"].view(1, -1).to("cuda")
-    import clip
-    model_clip, _ = clip.load('ViT-B/32', device='cuda:0')
-    with torch.no_grad():
-        inst_token = clip.tokenize(["push blue block to right"])
-        lang_emb = model_clip.encode_text(inst_token.cuda()).view(1, -1).float()
+    if args.lang_inst == "":
+        lang_emb = example["lang_emb"].view(1, -1).to("cuda")
+    else:
+        import clip
+        model_clip, _ = clip.load('ViT-B/32', device='cuda:0')
+        with torch.no_grad():
+            inst_token = clip.tokenize([args.lang_inst])
+            lang_emb = model_clip.encode_text(inst_token.cuda()).view(1, -1).float()
 
     # Load the model checkpoint
     model = STMaskGIT.from_pretrained(args.checkpoint_dir).to("cuda")
