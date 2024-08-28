@@ -3,6 +3,7 @@ import os
 import math
 import argparse
 import json
+from tqdm import tqdm
 import numpy as np
 import torch
 from torchvision.transforms.functional import resize
@@ -37,6 +38,12 @@ def parse_args():
     )
     parser.add_argument(
         "--max_length", default=4000000, type=int, help="Maximum number of frames in the dataset"
+    )
+    parser.add_argument(
+        "--start_ratio", default=0, type=float,
+    )
+    parser.add_argument(
+        "--end_ratio", default=0, type=float,
     )
     args = parser.parse_args()
     return args
@@ -93,11 +100,11 @@ def main():
     env = lmdb.open(args.in_dir, readonly=True, create=False, lock=False)
     with env.begin() as txn:
         dataset_len = loads(txn.get('cur_step'.encode())) + 1
-        start_frame_id = int(dataset_len*0.99)
+        start_frame_id = int(dataset_len*args.start_ratio)
         start_ep_idx = loads(txn.get(f'cur_episode_{start_frame_id}'.encode()))
-        end_frame_id = dataset_len
+        end_frame_id = int(dataset_len*args.end_ratio)
         last_ep_idx = 0
-        for frame_idx in range(start_frame_id, end_frame_id, 1):
+        for frame_idx in tqdm(range(start_frame_id, end_frame_id, 1), desc="convert frame"):
             rgb_static = decode_jpeg(loads(txn.get(f'rgb_static_{frame_idx}'.encode()))).unsqueeze(0)
             encoded_indices = encode_video_wrapper(rgb_static, args.square_resolution, magvit)[0].cpu().numpy()
             ep_idx = loads(txn.get(f'cur_episode_{frame_idx}'.encode()))
@@ -117,7 +124,6 @@ def main():
                 video_fp.flush()
                 lang_fp.flush()
                 segment_fp.flush()
-                print(ep_idx)
         video_fp.flush()
         lang_fp.flush()
         segment_fp.flush()

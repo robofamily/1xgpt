@@ -35,20 +35,20 @@ class FactorizedEmbedding(nn.Module):
         Returns:
             input embeddings: Shape (B, T, H*W, d_model)
         """
-        # initialize all embeddings to the mask token embedding, and then fill in actual token embeddings
-        embeds = self.mask_token_embed.repeat(input_ids.size() + (1,))
-        is_not_mask = input_ids != self.mask_token_id
-
+        # First compute all token embeddings and then change some of them with masked embeddings
         factored_token_ids = factorize_token_ids(
-            input_ids[is_not_mask], self.num_factored_vocabs, self.factored_vocab_size
+            input_ids, self.num_factored_vocabs, self.factored_vocab_size
         )
 
-        unmasked_embeds = [
+        embeds = [
             factored_embed(factored_token_ids)
             for factored_embed, factored_token_ids in zip(self.factored_embeds, factored_token_ids.unbind(-1))
         ]
+        embeds = torch.sum(torch.stack(embeds), dim=0)
 
-        embeds[is_not_mask] = torch.sum(torch.stack(unmasked_embeds), dim=0)
+        is_mask = (input_ids == self.mask_token_id).unsqueeze(-1)
+        mask_embeds = self.mask_token_embed.repeat(input_ids.size() + (1,))
+        embeds.masked_scatter_(is_mask, mask_embeds)
         return embeds
 
 

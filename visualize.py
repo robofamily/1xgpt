@@ -22,10 +22,8 @@ from matplotlib import pyplot as plt
 from data import RawTokenDataset
 from magvit2.config import VQConfig
 from magvit2.models.lfqgan import VQModel
+from Magvit2Dpt import Magvit2Dpt
 
-yellow = np.array([255, 255, 0]).reshape(1, 1, 3)
-red = np.array([255, 0, 0]).reshape(1, 1, 3)
-blue = np.array([0, 0, 255]).reshape(1, 1, 3)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize tokenized video as GIF or comic.")
@@ -101,13 +99,16 @@ def rescale_magvit_output(magvit_output):
     return clipped_output
 
 
-def decode_latents_wrapper(batch_size=16, tokenizer_ckpt="data/magvit2.ckpt", max_images=None):
+def decode_latents_wrapper(batch_size=16, tokenizer_ckpt='data/magvit2.ckpt', depth_decoder_ckpt='data/depth_decoder.ckpt', max_images=None):
     device = "cuda"
     dtype = torch.bfloat16
 
-    model_config = VQConfig()
-    model = VQModel(model_config, ckpt_path=tokenizer_ckpt)
-    model = model.to(device=device, dtype=dtype)
+    magvit_config = VQConfig()
+    magvit = VQModel(magvit_config, ckpt_path=tokenizer_ckpt)
+    magvit = magvit.to(device=device, dtype=dtype)
+
+    magvit2dpt = Magvit2Dpt(freeze_dpt=True).to(device)
+    magvit2dpt.load_state_dict(torch.load(depth_decoder_ckpt))
 
     @torch.no_grad()
     def decode_latents(video_data):
@@ -115,18 +116,23 @@ def decode_latents_wrapper(batch_size=16, tokenizer_ckpt="data/magvit2.ckpt", ma
         video_data: (b, h, w), where b is different from training/eval batch size.
         """
         decoded_imgs = []
+        decoded_depth = []
 
         for shard_ind in range(math.ceil(len(video_data) / batch_size)):
             batch = torch.from_numpy(video_data[shard_ind * batch_size: (shard_ind + 1) * batch_size].astype(np.int64))
-            if model.use_ema:
-                with model.ema_scope():
-                    quant = model.quantize.get_codebook_entry(rearrange(batch, "b h w -> b (h w)"),
-                                                              bhwc=batch.shape + (model.quantize.codebook_dim,)).flip(1)
-                    decoded_imgs.append(((rescale_magvit_output(model.decode(quant.to(device=device, dtype=dtype))))))
+            if magvit.use_ema:
+                with magvit.ema_scope():
+                    quant = magvit.quantize.get_codebook_entry(rearrange(batch, "b h w -> b (h w)"),
+                                                              bhwc=batch.shape + (magvit.quantize.codebook_dim,)).flip(1)
+                    quant = quant.to(device=device, dtype=dtype)
+                    decoded_imgs.append(((rescale_magvit_output(magvit.decode(quant)))))
+                    decoded_depth.append(magvit2dpt.decode(quant))
             if max_images and len(decoded_imgs) * batch_size >= max_images:
                 break
 
-        return [img.permute(1, 2, 0).numpy() for img in torch.cat(decoded_imgs)]
+        decoded_imgs = [img.permute(1, 2, 0).numpy() for img in torch.cat(decoded_imgs)]
+        decoded_depth = [depth.cpu().numpy() for depth in torch.cat(decoded_depth)]
+        return decoded_imgs, decoded_depth
 
     return decode_latents
 

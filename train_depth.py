@@ -181,7 +181,6 @@ def parse_args():
     parser.add_argument("--workers_per_gpu", default=12, type=int)
     parser.add_argument("--print_steps", default=200, type=int)
     parser.add_argument("--freeze_dpt", default=True, type=bool)
-    parser.add_argument("--n_blocks", default=8, type=int)
 
     args = parser.parse_args()
     return args
@@ -232,12 +231,9 @@ if __name__ == '__main__':
         shuffle=True,
         persistent_workers=True,
     ) 
-    model = Magvit2Dpt(
-        magvit_ckpt_path=args.magvit_ckpt_path,
-        dpt_ckpt_path=args.dpt_ckpt_path,
-        freeze_dpt=args.freeze_dpt,
-        n_blocks=args.n_blocks, 
-    ).to(device)
+    model = Magvit2Dpt(freeze_dpt=args.freeze_dpt).to(device)
+    model.load_magvit(magvit_ckpt_path=args.magvit_ckpt_path)
+    model.load_dpt(dpt_ckpt_path=args.dpt_ckpt_path)
     save_path = Path(args.save_path)
     save_path.mkdir(parents=True, exist_ok=True)
     if os.path.isfile(save_path/'magvit2dpt_{}.pth'.format(args.load_epoch)):
@@ -246,7 +242,7 @@ if __name__ == '__main__':
         run_id = json.load(open(save_path/"wandb_id.json", "r"))
         acc.init_trackers(
             project_name="magvit2dpt",
-            init_kwargs={"wandb": {"id": run_id, "resume": "must"}}
+            init_kwargs={"wandb": {"id": run_id, "resume": "allow"}}
         )
         acc.print('load ', save_path/'magvit2dpt_{}.pth'.format(args.load_epoch), '\nmissing ', missing_keys, '\nunexpected ', unexpected_keys)
     else:

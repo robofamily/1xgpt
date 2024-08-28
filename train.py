@@ -51,6 +51,14 @@ def parse_args():
         help="Directory containing tokenized data, should have a `video.bin`, `metadata.json` and `segment_ids.json`."
     )
     parser.add_argument(
+        "--tokenizer_ckpt", type=str, default="data/magvit2.ckpt",
+        help="Path to the VQVAE checkpoint"
+    )
+    parser.add_argument(
+        "--depth_decoder_ckpt", type=str, default="data/depth_decoder.ckpt",
+        help="Path to the depth decoder checkpoint"
+    )
+    parser.add_argument(
         "--window_size",
         type=int,
         default=16,
@@ -256,7 +264,7 @@ def save_checkpoint(model, accelerator, args, filename):
 
 
 @torch.no_grad()
-def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval", max_steps=1):
+def visualize(accelerator, model, tokenizer_ckpt, depth_decoder_ckpt, dataloader, window_size, metrics_prefix="eval", max_steps=1):
     """
     Visualizes model's autoregressive generation outputs, logged to wandb.
 
@@ -266,7 +274,10 @@ def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval"
     unwrapped_model = accelerator.unwrap_model(model)
 
     metadata = dataloader.dataset.metadata
-    decode_latents = decode_latents_wrapper()  # re-initializing every time to save memory
+    decode_latents = decode_latents_wrapper(
+        tokenizer_ckpt=tokenizer_ckpt, 
+        depth_decoder_ckpt=depth_decoder_ckpt,
+    )  # re-initializing every time to save memory
     if accelerator.is_main_process:
         lpips_alex = lpips.LPIPS(net="alex")  # Calculate LPIPS w/ AlexNet, the fastest option
         metrics = {"ar_lpips": []}
@@ -275,9 +286,9 @@ def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval"
 
     unwrapped_model.eval()
     for step, batch in enumerate(dataloader):
-        # Note: hardcoding 4 image cap for faster inference on small models
-        reshaped_labels = rearrange(batch["labels"][:4], "b (t s) -> b t s", t=window_size).to(accelerator.device)  # `s` is really `(h, w)`
-        lang_emb = batch["lang_emb"][:4]
+        # Note: hardcoding 1 image cap for faster inference on small models
+        reshaped_labels = rearrange(batch["labels"][:1], "b (t s) -> b t s", t=window_size).to(accelerator.device)  # `s` is really `(h, w)`
+        lang_emb = batch["lang_emb"][:1]
 
         num_prompt_frames = window_size // 2  # hardcoding half of frames for context
         num_new_tokens = latent_side_len ** 2 * (window_size - num_prompt_frames)
@@ -289,29 +300,37 @@ def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval"
         gtruth_tokens = rearrange(reshaped_labels[:, num_prompt_frames:], "b t (h w) -> b t h w",
                                   h=latent_side_len, w=latent_side_len)
 
-        decoded_output = decode_tokens(output_tokens.cpu(), decode_latents)
-        decoded_gtruth = decode_tokens(gtruth_tokens.cpu(), decode_latents)
+        decoded_output, decoded_depth = decode_tokens(output_tokens.cpu(), decode_latents)
+        decoded_gtruth, _ = decode_tokens(gtruth_tokens.cpu(), decode_latents)
 
         decoded_output = accelerator.gather(decoded_output.to(accelerator.device)).cpu()
+        decoded_depth = accelerator.gather(decoded_depth.to(accelerator.device)).cpu()
         decoded_gtruth = accelerator.gather(decoded_gtruth.to(accelerator.device)).cpu()
 
         if accelerator.is_main_process:
             exs_per_fig = 4
             for j in range(0, len(decoded_output), exs_per_fig):
-                fig, axs = plt.subplots(nrows=2 * exs_per_fig, ncols=window_size, figsize=(3 * window_size, 3 * 2 * exs_per_fig))
+                # size of each sub fig is 3*3. Each sequence is shown in 3 rows (gtruth, pred, depth) 
+                fig, axs = plt.subplots(nrows=3 * exs_per_fig, ncols=window_size, figsize=(3 * window_size, 3 * 3 * exs_per_fig))
                 # If len(decoded_output) is not a multiple of 4, make sure to truncate properly
                 for k in range(min(exs_per_fig, len(decoded_output) - j)):
                     for i in range(num_prompt_frames):
-                        for ax in (axs[k * 2, i], axs[k * 2 + 1, i]):
-                            ax.imshow(transforms_f.to_pil_image(decoded_output[j + k, i]))
-                            ax.set_title("Context")
+                        axs[k * 3, i].imshow(transforms_f.to_pil_image(decoded_output[j + k, i]))
+                        axs[k * 3, i].set_title("Prompt RGB")
+                        axs[k * 3 + 1, i].imshow(transforms_f.to_pil_image(decoded_output[j + k, i]))
+                        axs[k * 3 + 1, i].set_title("Prompt RGB")
+                        axs[k * 3 + 2, i].imshow(decoded_depth[j + k, i])
+                        axs[k * 3 + 2, i].set_title("Prompt Depth")
+                        for ax in axs[:, i]:
                             ax.axis("off")
 
                     for i in range(num_prompt_frames, window_size):
-                        axs[k * 2, i].imshow(transforms_f.to_pil_image(decoded_gtruth[j + k, i - num_prompt_frames]))
-                        axs[k * 2, i].set_title("Ground truth")
-                        axs[k * 2 + 1, i].imshow(transforms_f.to_pil_image(decoded_output[j + k, i]))
-                        axs[k * 2 + 1, i].set_title("Prediction")
+                        axs[k * 3, i].imshow(transforms_f.to_pil_image(decoded_gtruth[j + k, i - num_prompt_frames]))
+                        axs[k * 3, i].set_title("Gtruth RGB")
+                        axs[k * 3 + 1, i].imshow(transforms_f.to_pil_image(decoded_output[j + k, i]))
+                        axs[k * 3 + 1, i].set_title("Pred RGB")
+                        axs[k * 3 + 2, i].imshow(transforms_f.to_pil_image(decoded_depth[j + k, i]))
+                        axs[k * 3 + 2, i].set_title("Pred Depth")
                         for ax in axs[:, i]:
                             ax.axis("off")
 
@@ -736,9 +755,9 @@ def main():
 
             if completed_steps % args.vis_every_n_steps == 0:
                 if not args.overfit_first_batch:  # val is same as train otherwise
-                    visualize(accelerator, model, eval_dataloader, args.window_size, "val")
+                    visualize(accelerator, model, args.tokenizer_ckpt, args.depth_decoder_ckpt, eval_dataloader, args.window_size, "val")
 
-                visualize(accelerator, model, train_dataloader, args.window_size, "train")
+                visualize(accelerator, model, args.tokenizer_ckpt, args.depth_decoder_ckpt, train_dataloader, args.window_size, "train")
 
             if completed_steps >= args.max_train_steps:
                 break

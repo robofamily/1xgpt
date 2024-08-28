@@ -5,3 +5,5 @@ data/
 .idea/
 subsample_val.py
 *.sh
+*.egg-info/
+wandb/

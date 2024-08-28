@@ -36,9 +36,12 @@ def decode_tokens(reshaped_token_ids: torch.LongTensor, decode_latents: Callable
     Returns:
         (B, T, 3, 256, 256)
     """
-    decoded_imgs = decode_latents(rearrange(reshaped_token_ids, "b t h w -> (b t) h w").cpu().numpy())
-    decoded_tensor = torch.stack([transforms_f.pil_to_tensor(pred_img) for pred_img in decoded_imgs])
-    return rearrange(decoded_tensor, "(b t) c H W -> b t c H W", b=reshaped_token_ids.size(0))
+    decoded_imgs, decoded_depth = decode_latents(rearrange(reshaped_token_ids, "b t h w -> (b t) h w").cpu().numpy())
+    decoded_imgs = torch.stack([torch.tensor(pred_img) for pred_img in decoded_imgs])
+    decoded_imgs = rearrange(decoded_imgs, "(b t) H W c -> b t c H W", b=reshaped_token_ids.size(0))
+    decoded_depth = torch.stack([torch.from_numpy(pred_depth) for pred_depth in decoded_depth])
+    decoded_depth = rearrange(decoded_depth, "(b t) H W -> b t H W", b=reshaped_token_ids.size(0))
+    return decoded_imgs, decoded_depth
 
 
 def compute_loss(

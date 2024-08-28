@@ -84,10 +84,8 @@ class Transformer(nn.Module):
 class Magvit2Dpt(nn.Module):
     def __init__(
             self,
-            magvit_ckpt_path,
-            dpt_ckpt_path,
             freeze_dpt,
-            n_blocks, 
+            n_blocks=8, 
             head_dim=8, 
             n_heads=64, 
             max_T=729, 
@@ -95,24 +93,18 @@ class Magvit2Dpt(nn.Module):
             ):
         super().__init__()
         vq_config = VQConfig()
-        self.magvit_model = VQModel(vq_config, ckpt_path=magvit_ckpt_path).to(dtype=torch.bfloat16)
+        self.magvit_model = VQModel(vq_config).to(dtype=torch.bfloat16)
         for param in self.magvit_model.parameters():
             param.requires_grad = False
-        print('load ', magvit_ckpt_path)
 
         self.max_depth = 20 # take from original settings
-        dpt_model = DepthAnythingV2(
+        self.dpt_model = DepthAnythingV2(
             encoder='vitl',
             features=256,
             out_channels=[256, 512, 1024, 1024],
             max_depth=self.max_depth,
-        )
-        missing_keys, unexpected_keys = dpt_model.load_state_dict(torch.load(dpt_ckpt_path), strict=False)
-        self.dpt_model = dpt_model.depth_head
-        if freeze_dpt:
-            for param in self.dpt_model.parameters():
-                param.requires_grad = False
-        print('load ', dpt_ckpt_path, '\nmissing ', missing_keys, '\nunexpected ', unexpected_keys)
+        ).depth_head
+        self.freeze_dpt = freeze_dpt
             
         self.magvit2dpt = Transformer(
             in_dim=512, 
@@ -134,15 +126,35 @@ class Magvit2Dpt(nn.Module):
             sum(p.numel() for p in self.magvit2dpt.parameters()))
         )
 
-    def forward(self, rgbs):
-        quant, _, _, _ = self.magvit_model.encode(rgbs.to(dtype=torch.bfloat16))
+    def load_magvit(self, magvit_ckpt_path):
+        self.magvit_model.init_from_ckpt(magvit_ckpt_path)
+
+    def load_dpt(self, dpt_ckpt_path):
+        dpt_model = DepthAnythingV2(
+            encoder='vitl',
+            features=256,
+            out_channels=[256, 512, 1024, 1024],
+            max_depth=self.max_depth,
+        )
+        missing_keys, unexpected_keys = dpt_model.load_state_dict(torch.load(dpt_ckpt_path), strict=False)
+        print('load ', dpt_ckpt_path, '\nmissing ', missing_keys, '\nunexpected ', unexpected_keys)
+        self.dpt_model = dpt_model.depth_head
+        if self.freeze_dpt:
+            for param in self.dpt_model.parameters():
+                param.requires_grad = False
+
+    def decode(self, quant):
         features = self.magvit_model.decoder.conv_in(quant)
         for res in range(self.magvit_model.decoder.num_res_blocks):
             features = self.magvit_model.decoder.mid_block[res](features)
 
         B, C, H, W = features.shape
-        features = features.to(dtype=rgbs.dtype).flatten(2).permute(0, 2, 1) # (b c h w) -> (b hw c)
+        features = features.to(dtype=torch.float32).flatten(2).permute(0, 2, 1) # (b c h w) -> (b hw c)
         features = self.magvit2dpt(features)
 
         depth = self.dpt_model(features, H, W) * self.max_depth
         return depth.squeeze(1)
+
+    def forward(self, rgbs):
+        quant, _, _, _ = self.magvit_model.encode(rgbs.to(dtype=torch.bfloat16))
+        return self.decode(quant)
