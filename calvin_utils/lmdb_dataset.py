@@ -2,14 +2,13 @@ import io
 import gc
 from time import time
 import lmdb
-from pickle import loads
+from pickle import loads, dumps
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from torchvision.io import decode_jpeg, decode_png
 
 ORIGINAL_STATIC_RES = 200
-ORIGINAL_GRIPPER_RES = 84
 DEPTH_MAX = 10
 DEPTH_MIN = 0
 
@@ -75,33 +74,43 @@ class DataPrefetcher():
         return batch, time
 
 class LMDBDataset(Dataset):
-    def __init__(self, lmdb_dir, sequence_length, chunk_size, action_mode, action_dim, load_gripper_image, start_ratio, end_ratio):
+    def __init__(self, lmdb_dir, sequence_length, chunk_size, action_mode, action_dim, has_quant, start_ratio, end_ratio):
         super(LMDBDataset).__init__()
         self.sequence_length = sequence_length
         self.chunk_size = chunk_size
         self.action_mode = action_mode
         self.action_dim = action_dim
+        self.has_quant = has_quant
         self.dummy_rgb_static = torch.zeros(sequence_length, 3, ORIGINAL_STATIC_RES, ORIGINAL_STATIC_RES, dtype=torch.uint8)
         self.dummy_depth_static = torch.zeros(sequence_length, ORIGINAL_STATIC_RES, ORIGINAL_STATIC_RES)
-        self.load_gripper_image = load_gripper_image
-        if load_gripper_image:
-            self.dummy_rgb_gripper = torch.zeros(sequence_length, 3, ORIGINAL_GRIPPER_RES, ORIGINAL_GRIPPER_RES, dtype=torch.uint8)
-            self.dummy_depth_gripper = torch.zeros(sequence_length, ORIGINAL_GRIPPER_RES, ORIGINAL_GRIPPER_RES)
         self.dummy_arm_state = torch.zeros(sequence_length, 6)
-        self.dummy_gripper_state =  torch.zeros(sequence_length, 2)
+        self.dummy_gripper_state = torch.zeros(sequence_length, 2)
         self.dummy_actions = torch.zeros(sequence_length, chunk_size, action_dim)
         self.dummy_mask = torch.zeros(sequence_length, chunk_size)
         self.lmdb_dir = lmdb_dir
-        env = lmdb.open(lmdb_dir, readonly=True, create=False, lock=False)
+        env = lmdb.open(self.lmdb_dir, readonly=True, lock=False)
         with env.begin() as txn:
             dataset_len = loads(txn.get('cur_step'.encode())) + 1
             self.start_step = int(dataset_len * start_ratio)
             self.end_step = int(dataset_len * end_ratio) - sequence_length - chunk_size
+            if self.has_quant:
+                quant_ids = loads(txn.get('quant_ids_0'.encode()))
+                self.dummy_quant_ids = torch.zeros((sequence_length,)+quant_ids.shape, dtype=quant_ids.dtype)
         env.close()
 
     def open_lmdb(self):
-        self.env = lmdb.open(self.lmdb_dir, readonly=True, create=False, lock=False)
-        self.txn = self.env.begin()
+        self.env = lmdb.open(self.lmdb_dir, map_size=int(3e12), readonly=False, lock=False)
+        self.txn = self.env.begin(write=True)
+
+    def save_quant_ids(self, quant_ids, idx):
+        if hasattr(self, 'env') == 0:
+            self.open_lmdb()
+        idx = idx + self.start_step
+        self.txn.put(f'quant_ids_{idx}'.encode(), dumps(quant_ids))
+    
+    def flush(self):
+        self.txn.commit()
+        self.txn = self.env.begin(write=True)
 
     def __getitem__(self, idx):
         if hasattr(self, 'env') == 0:
@@ -109,25 +118,23 @@ class LMDBDataset(Dataset):
 
         idx = idx + self.start_step
 
+        if self.has_quant:
+            quant_ids = self.dummy_quant_ids.clone()
         rgb_static = self.dummy_rgb_static.clone()
         depth_static = self.dummy_depth_static.clone()
-        if self.load_gripper_image:
-            rgb_gripper = self.dummy_rgb_gripper.clone()
-            depth_gripper = self.dummy_depth_gripper.clone()
         arm_state = self.dummy_arm_state.clone()
         gripper_state = self.dummy_gripper_state.clone()
         actions = self.dummy_actions.clone()
         mask = self.dummy_mask.clone()
 
         cur_episode = loads(self.txn.get(f'cur_episode_{idx}'.encode()))
-        inst_token = loads(self.txn.get(f'inst_token_{cur_episode}'.encode()))
+        inst_emb = loads(self.txn.get(f'inst_emb_{cur_episode}'.encode())).float()
         for i in range(self.sequence_length):
             if loads(self.txn.get(f'cur_episode_{idx+i}'.encode())) == cur_episode:
+                if self.has_quant:
+                    quant_ids[i] = loads(self.txn.get(f'quant_ids_{idx+i}'.encode()))
                 rgb_static[i] = decode_jpeg(loads(self.txn.get(f'rgb_static_{idx+i}'.encode())))
                 depth_static[i] = png_to_float(loads(self.txn.get(f'depth_static_{idx+i}'.encode())))
-                if self.load_gripper_image:
-                    rgb_gripper[i] = decode_jpeg(loads(self.txn.get(f'rgb_gripper_{idx+i}'.encode())))
-                    depth_gripper[i] = png_to_float(loads(self.txn.get(f'depth_gripper_{idx+i}'.encode())))
                 robot_obs = loads(self.txn.get(f'robot_obs_{idx+i}'.encode()))
                 arm_state[i, :6] = robot_obs[:6]
                 gripper_state[i, ((robot_obs[-1] + 1) / 2).long()] = 1
@@ -142,15 +149,14 @@ class LMDBDataset(Dataset):
         out = {
             'rgb_static': rgb_static,
             'depth_static': depth_static,
-            'inst_token': inst_token,
+            'inst_emb': inst_emb,
             'arm_state': arm_state,
             'gripper_state': gripper_state,
             'actions': actions,
             'mask': mask,
         }
-        if self.load_gripper_image:
-            out['rgb_gripper'] = rgb_gripper
-            out['depth_gripper'] = depth_gripper
+        if self.has_quant:
+            out['quant_ids'] = quant_ids
         return out
 
     def __len__(self):

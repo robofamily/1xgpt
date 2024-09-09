@@ -1,0 +1,23 @@
+accelerate launch train_depth.py \
+--calvin_dir /public/home/muyao/1x_train/calvin_lmdb_with_depth \
+--magvit_ckpt_path /public/home/muyao/1x_train/Open-MAGVIT2/imagenet_128_B.ckpt \
+--genie_ckpt_path /public/home/muyao/1x_train/1xgpt/data/step_40000 \
+--dpt_ckpt_path /public/home/muyao/1x_train/1xgpt/data/depth_anything_v2_metric_hypersim_vitl.pth \
+--save_path ../data/magvit2dpt_pretrained/ \
+--square_resolution 200 \
+--genie_config ../genie/configs/magvit_n32_h8_d256.json \
+--seq_len 16 \
+--maskgit_steps 1 \
+--window_size 16 \
+--latent_side_len 25 \
+--num_epochs 5 \
+--save_steps 1000 \
+--load_epoch 0 \
+--bs_per_gpu 8 \
+--lr_max 1e-4 \
+--workers_per_gpu 12 \
+--gradient_accumulation_steps 1 \
+--print_steps 1000 \
+--num_warmup_epochs 0 \
+--freeze_dpt False \
+--use_genie True \

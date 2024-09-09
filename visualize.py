@@ -22,7 +22,7 @@ from matplotlib import pyplot as plt
 from data import RawTokenDataset
 from magvit2.config import VQConfig
 from magvit2.models.lfqgan import VQModel
-from Magvit2Dpt import Magvit2Dpt
+from train_depth.Magvit2Dpt import Magvit2Dpt
 
 
 def parse_args():
@@ -45,6 +45,12 @@ def parse_args():
         type=str,
         default="data/magvit2.ckpt",
         help="Path of the ckpt file of magvit2"
+    )
+    parser.add_argument(
+        "--depth_decoder_ckpt",
+        type=str,
+        default="data/magvit2dpt_0.pth",
+        help="Path of the ckpt file of depth decoder"
     )
     parser.add_argument(
         "--offset", type=int, default=0, help="Offset to start generating images from"
@@ -99,15 +105,29 @@ def rescale_magvit_output(magvit_output):
     return clipped_output
 
 
-def decode_latents_wrapper(batch_size=16, tokenizer_ckpt='data/magvit2.ckpt', depth_decoder_ckpt='data/depth_decoder.ckpt', max_images=None):
+def decode_latents_wrapper(
+        batch_size=16, 
+        tokenizer_ckpt='data/magvit2.ckpt', 
+        depth_decoder_ckpt='data/depth_decoder.ckpt', 
+        genie_config='genie/configs/magvit_n32_h8_d256.json',
+        window_size=16,
+        latent_side_len=25,
+        max_images=None
+    ):
     device = "cuda"
-    dtype = torch.bfloat16
 
     magvit_config = VQConfig()
     magvit = VQModel(magvit_config, ckpt_path=tokenizer_ckpt)
-    magvit = magvit.to(device=device, dtype=dtype)
+    magvit = magvit.to(device=device, dtype=torch.bfloat16)
 
-    magvit2dpt = Magvit2Dpt(freeze_dpt=True).to(device)
+    magvit2dpt = Magvit2Dpt(
+        genie_config=genie_config,
+        maskgit_steps=1,
+        window_size=window_size,
+        latent_side_len=latent_side_len,
+        use_genie=False,
+        freeze_dpt=True,
+    ).to(device)
     magvit2dpt.load_state_dict(torch.load(depth_decoder_ckpt))
 
     @torch.no_grad()
@@ -124,14 +144,15 @@ def decode_latents_wrapper(batch_size=16, tokenizer_ckpt='data/magvit2.ckpt', de
                 with magvit.ema_scope():
                     quant = magvit.quantize.get_codebook_entry(rearrange(batch, "b h w -> b (h w)"),
                                                               bhwc=batch.shape + (magvit.quantize.codebook_dim,)).flip(1)
-                    quant = quant.to(device=device, dtype=dtype)
+                    quant = quant.to(device=device, dtype=torch.bfloat16)
                     decoded_imgs.append(((rescale_magvit_output(magvit.decode(quant)))))
                     decoded_depth.append(magvit2dpt.decode(quant))
             if max_images and len(decoded_imgs) * batch_size >= max_images:
                 break
 
         decoded_imgs = [img.permute(1, 2, 0).numpy() for img in torch.cat(decoded_imgs)]
-        decoded_depth = [depth.cpu().numpy() for depth in torch.cat(decoded_depth)]
+        decoded_depth = transforms_f.resize(torch.cat(decoded_depth), decoded_imgs[0].shape[:-1])
+        decoded_depth = [depth.cpu().numpy() for depth in decoded_depth]
         return decoded_imgs, decoded_depth
 
     return decode_latents
@@ -160,6 +181,21 @@ def caption_image(pil_image: Image, caption: str):
 
     return new_image
 
+def combine_rgb_depth(rgb_frames, depth_frames):
+    combined_frames = []
+    for rgb_frame, depth_frame in zip(rgb_frames, depth_frames):
+        plt.imshow(depth_frame)
+        plt.axis('off')
+        plt.savefig('temp_depth.png', bbox_inches='tight', pad_inches=0)
+        plt.close()
+        pseudo_color_image = Image.open('temp_depth.png')
+        rgb_image_pil = Image.fromarray(rgb_frame)
+        pseudo_color_image = pseudo_color_image.resize(rgb_image_pil.size)
+        combined_image = Image.new('RGB', (rgb_image_pil.width + pseudo_color_image.width, rgb_image_pil.height))
+        combined_image.paste(rgb_image_pil, (0, 0))
+        combined_image.paste(pseudo_color_image, (rgb_image_pil.width, 0))
+        combined_frames.append(combined_image)
+    return combined_frames
 
 @torch.no_grad()
 def main():
@@ -170,7 +206,12 @@ def main():
     video_tokens = token_dataset.data
     metadata = token_dataset.metadata
 
-    video_frames = decode_latents_wrapper(max_images=args.max_images, tokenizer_ckpt=args.tokenizer_ckpt)(video_tokens[args.offset::args.stride])
+    video_frames, depth_frames = decode_latents_wrapper(
+        max_images=args.max_images, 
+        tokenizer_ckpt=args.tokenizer_ckpt,
+        depth_decoder_ckpt=args.depth_decoder_ckpt,
+    )(video_tokens[args.offset::args.stride])
+    video_frames = combine_rgb_depth(video_frames, depth_frames)
     output_gif_path = os.path.join(args.token_dir, f"generated_offset{args.offset}.gif")
 
     # `generate` should populate `metadata.json` with these keys, while ground truth metadata does not have them
@@ -197,7 +238,7 @@ def main():
     print(f"Saved to {output_gif_path}")
 
     if args.generated_data:
-        fig, axs = plt.subplots(nrows=2, ncols=metadata["window_size"], figsize=(3 * metadata["window_size"], 3 * 2))
+        fig, axs = plt.subplots(nrows=2, ncols=metadata["window_size"], figsize=(3 * 2 * metadata["window_size"], 3 * 2))
         for i, image in enumerate(video_frames):
             if i < metadata["num_prompt_frames"]:
                 curr_axs = [axs[0, i], axs[1, i]]

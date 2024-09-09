@@ -48,19 +48,6 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def open_video(file):
-    # Open an mp4 file
-    container = av.open(file)
-    video = []
-
-    for frame in container.decode(video=0):
-        # Convert frame to numpy array in RGB format
-        rgb_image = frame.to_rgb().to_ndarray()
-        video.append(rgb_image)
-
-    container.close()
-    return torch.from_numpy(np.stack(video))
-
 def encode_video_wrapper(video_data, square_res, magvit, batch_size=16):
     """
     video_data: (t, h, w, c)
@@ -135,7 +122,7 @@ def main():
         "s": encoded_indices.shape[1], 
         "h": encoded_indices.shape[1], 
         "w": encoded_indices.shape[1], 
-        "vocab_size": 262144, 
+        "vocab_size": VQConfig.codebook_size, 
         "hz": 30, 
         "num_images": end_frame_id - start_frame_id,
         "tokenizer_ckpt": str(args.magvit_ckpt_path),
