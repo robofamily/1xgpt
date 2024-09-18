@@ -24,6 +24,7 @@ from magvit2.config import VQConfig
 from magvit2.models.lfqgan import VQModel
 from train_depth.Magvit2Dpt import Magvit2Dpt
 
+from track_visualize import TrackVisualizer, track_chunks
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize tokenized video as GIF or comic.")
@@ -60,6 +61,9 @@ def parse_args():
     )
     parser.add_argument(
         "--max_images", type=int, default=None, help="Maximum number of images to generate. None for all."
+    )
+    parser.add_argument(
+        "--track", action="store_true",
     )
     parser.add_argument(
         "--generated_data", action="store_true",
@@ -205,17 +209,53 @@ def main():
     token_dataset = RawTokenDataset(args.token_dir, 1, filter_interrupts=False, filter_overlaps=False)
     video_tokens = token_dataset.data
     metadata = token_dataset.metadata
+    output_gif_path = os.path.join(args.token_dir, f"generated_offset{args.offset}.gif")
 
     video_frames, depth_frames = decode_latents_wrapper(
         max_images=args.max_images, 
         tokenizer_ckpt=args.tokenizer_ckpt,
         depth_decoder_ckpt=args.depth_decoder_ckpt,
     )(video_tokens[args.offset::args.stride])
-    video_frames = combine_rgb_depth(video_frames, depth_frames)
-    output_gif_path = os.path.join(args.token_dir, f"generated_offset{args.offset}.gif")
 
     # `generate` should populate `metadata.json` with these keys, while ground truth metadata does not have them
     is_generated_data = all(key in metadata for key in ("num_prompt_frames", "window_size"))
+    if args.track:
+        device = torch.device("cuda")
+        cotracker = torch.hub.load("facebookresearch/co-tracker", "cotracker2_online").to(device)
+        vis = TrackVisualizer(
+            save_dir="./saved_videos", 
+            linewidth=0.5,
+            mode='cool',
+        )
+        if is_generated_data:
+            pred, gen_track_frames = track_chunks(
+                cotracker, 
+                vis,
+                video_frames[metadata["num_prompt_frames"]:metadata["window_size"]], 
+                video_chunk_max_len=metadata["window_size"]-metadata["num_prompt_frames"], 
+                threshold_perc=0.2, 
+                grid_size=50,
+            )
+            pred, gtruth_track_frames = track_chunks(
+                cotracker, 
+                vis,
+                video_frames[metadata["window_size"]:], 
+                video_chunk_max_len=metadata["window_size"]-metadata["num_prompt_frames"], 
+                threshold_perc=0.2, 
+                grid_size=50,
+            )
+            video_frames = video_frames[:metadata["num_prompt_frames"]] + gen_track_frames + gtruth_track_frames
+        else:
+            pred, gtruth_track_frames = track_chunks(
+                cotracker, 
+                vis,
+                video_frames, 
+                video_chunk_max_len=metadata["window_size"]-metadata["num_prompt_frames"], 
+                threshold_perc=0.2, 
+                grid_size=50,
+            )
+            video_frames = video_frames[:metadata["num_prompt_frames"]] + gtruth_track_frames
+    video_frames = combine_rgb_depth(video_frames, depth_frames)
     if is_generated_data:
         if video_tokens.shape[0] != metadata["window_size"] * 2 - metadata["num_prompt_frames"]:
             raise ValueError(f"Unexpected {video_tokens.shape=} given {metadata['window_size']=}, {metadata['num_prompt_frames']=}")
