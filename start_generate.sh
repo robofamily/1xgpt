@@ -12,5 +12,6 @@ python visualize.py \
 --tokenizer_ckpt /public/home/muyao/1x_train/Open-MAGVIT2/imagenet_128_B.ckpt \
 --depth_decoder_ckpt data/magvit2dpt_pretrained/magvit2dpt_0.pth \
 --offset 0 \
---generated_data;
+--generated_data \
+--draw_point_cloud
 # python visualize.py --token_dir data/validation_calvin --max_images 100;

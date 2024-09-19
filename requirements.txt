@@ -8,6 +8,7 @@ lightning>2.3.1
 tqdm==4.66.4
 wandb
 xformers==0.0.26.post1
+imgaug
 git+https://github.com/janEbert/mup.git@fsdp-fix
 
 # For flash-attn

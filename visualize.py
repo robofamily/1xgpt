@@ -26,6 +26,14 @@ from train_depth.Magvit2Dpt import Magvit2Dpt
 
 from track_visualize import TrackVisualizer, track_chunks
 
+FOV = 10
+VIEW_MATRIX = [
+    0.7232445478439331, -0.030260592699050903, 0.6899287700653076, 0.0, 
+    0.5141233801841736, 0.6906105875968933, -0.5086592435836792, 0.0, 
+    -0.46107974648475647, 0.7225935459136963, 0.5150379538536072, 0.0, 
+    0.21526622772216797, -0.26317155361175537, -4.399168968200684, 1.0,
+]
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize tokenized video as GIF or comic.")
     parser.add_argument(
@@ -64,6 +72,9 @@ def parse_args():
     )
     parser.add_argument(
         "--track", action="store_true",
+    )
+    parser.add_argument(
+        "--draw_point_cloud", action="store_true",
     )
     parser.add_argument(
         "--generated_data", action="store_true",
@@ -201,6 +212,84 @@ def combine_rgb_depth(rgb_frames, depth_frames):
         combined_frames.append(combined_image)
     return combined_frames
 
+def deproject(fov, view_matrix, depth_img):
+    """
+    Deprojects a pixel point to 3D coordinates
+    Args
+        fov: fov angle of the camera, in degree
+        view_matrix
+        depth_img: np.array; depth image used as reference to generate 3D coordinates
+    Output
+        (x, y, z): (3, npts) np.array; world coordinates of the deprojected point
+    """
+    h, w = depth_img.shape
+    u, v = np.meshgrid(np.arange(w), np.arange(h)) # coordinates of each pixel
+    u, v = u.ravel(), v.ravel() # reshaped to 1d list
+
+    # The OpenGV view matrix is a 1-dim list needed to be reshaped and transposed
+    T_world_cam = np.linalg.inv(np.array(view_matrix).reshape((4, 4)).T) # transform from cam to world
+    z = depth_img[v, u] # depth of each pixel 
+
+    """
+                     object height
+                      __________
+                      |        /
+                      |       / 
+                      |      /  
+                   z  |     /   
+                      |    /    
+                      |   /
+                      |  /
+                      | /       
+                      |/
+                     /|
+            FOV/2 ->/ |
+                   /  |
+                  /   |
+                 /    | 
+                /     | focal length (foc)
+               /      |
+              /       |
+             /        |
+            /_________|
+          image height
+    """
+
+    foc = h / (2 * np.tan(np.deg2rad(fov) / 2)) # focal length
+    x = (u - w // 2) * z / foc # object real width
+    y = -(v - h // 2) * z / foc # object real hight
+    z = -z
+
+    ones = np.ones_like(z) # this additional column does translation with mulplication
+    cam_pos = np.stack([x, y, z, ones], axis=0)
+    world_pos = T_world_cam @ cam_pos
+
+    return world_pos[:3]
+
+def draw_pcd(rgb_frames, depth_frames):
+    pcd_imgs = []
+    for rgb_frame, depth_frame in zip(rgb_frames, depth_frames):
+        world_pos = deproject(
+            FOV,
+            VIEW_MATRIX,
+            depth_frame,
+        ).T
+        rgb = rgb_frame / 255.
+        rgb = rearrange(rgb, 'h w c -> (h w) c')
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.view_init(15, 0)
+        ax.scatter(world_pos[:,0], world_pos[:,1], world_pos[:,2], s=1, c=rgb)
+        ax.proj_type = 'ortho'
+        fig.canvas.draw()
+        w, h = fig.canvas.get_width_height()
+        img_data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        img_data = img_data.reshape((h, w, 3))
+        pcd_imgs.append(Image.fromarray(img_data))
+        plt.close(fig)
+    return pcd_imgs
+
 @torch.no_grad()
 def main():
     args = parse_args()
@@ -255,7 +344,10 @@ def main():
                 grid_size=50,
             )
             video_frames = video_frames[:metadata["num_prompt_frames"]] + gtruth_track_frames
-    video_frames = combine_rgb_depth(video_frames, depth_frames)
+    if args.draw_point_cloud and not args.track:
+        video_frames = draw_pcd(video_frames, depth_frames)
+    else:
+        video_frames = combine_rgb_depth(video_frames, depth_frames)
     if is_generated_data:
         if video_tokens.shape[0] != metadata["window_size"] * 2 - metadata["num_prompt_frames"]:
             raise ValueError(f"Unexpected {video_tokens.shape=} given {metadata['window_size']=}, {metadata['num_prompt_frames']=}")
