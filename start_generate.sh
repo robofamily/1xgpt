@@ -3,9 +3,9 @@ python genie/generate.py \
 --checkpoint_dir /public/home/muyao/1x_train/1xgpt/data/genie_model/step_40000 \
 --output_dir data/genie_generated \
 --num_prompt_frames 1 \
---example_ind 0 \
+--example_ind 129 \
 --stride 3 \
---maskgit_steps 2;
+--maskgit_steps 1;
 
 python visualize.py \
 --token_dir data/genie_generated \
@@ -14,4 +14,3 @@ python visualize.py \
 --offset 0 \
 --generated_data \
 --draw_point_cloud
-# python visualize.py --token_dir data/validation_calvin --max_images 100;

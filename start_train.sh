@@ -13,7 +13,6 @@ accelerate launch train.py \
 --num_warmup_steps 1000 \
 --per_device_num_workers 12 \
 --tokenizer_ckpt /public/home/muyao/1x_train/Open-MAGVIT2/imagenet_128_B.ckpt \
---depth_decoder_ckpt /public/home/muyao/1x_train/1xgpt2/data/magvit2dpt_pretrained/magvit2dpt_0.pth \
---vis_every_n_steps 10 \
+--vis_every_n_steps 500 \
 --eval_every_n_steps 3000 \
 --max_eval_steps 10 \

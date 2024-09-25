@@ -58,7 +58,7 @@ def parse_args():
     parser.add_argument(
         "--depth_decoder_ckpt",
         type=str,
-        default="data/magvit2dpt_0.pth",
+        default=None,
         help="Path of the ckpt file of depth decoder"
     )
     parser.add_argument(
@@ -123,8 +123,8 @@ def rescale_magvit_output(magvit_output):
 def decode_latents_wrapper(
         batch_size=16, 
         tokenizer_ckpt='data/magvit2.ckpt', 
-        depth_decoder_ckpt='data/depth_decoder.ckpt', 
-        genie_config='genie/configs/magvit_n32_h8_d256.json',
+        depth_decoder_ckpt=None, 
+        genie_config=None,
         window_size=16,
         latent_side_len=25,
         max_images=None
@@ -135,15 +135,18 @@ def decode_latents_wrapper(
     magvit = VQModel(magvit_config, ckpt_path=tokenizer_ckpt)
     magvit = magvit.to(device=device, dtype=torch.bfloat16)
 
-    magvit2dpt = Magvit2Dpt(
-        genie_config=genie_config,
-        maskgit_steps=1,
-        window_size=window_size,
-        latent_side_len=latent_side_len,
-        use_genie=False,
-        freeze_dpt=True,
-    ).to(device)
-    magvit2dpt.load_state_dict(torch.load(depth_decoder_ckpt))
+    if depth_decoder_ckpt is None:
+        magvit2dpt = None
+    else:
+        magvit2dpt = Magvit2Dpt(
+            genie_config=genie_config,
+            maskgit_steps=1,
+            window_size=window_size,
+            latent_side_len=latent_side_len,
+            use_genie=False,
+            freeze_dpt=True,
+        ).to(device)
+        magvit2dpt.load_state_dict(torch.load(depth_decoder_ckpt))
 
     @torch.no_grad()
     def decode_latents(video_data):
@@ -161,13 +164,15 @@ def decode_latents_wrapper(
                                                               bhwc=batch.shape + (magvit.quantize.codebook_dim,)).flip(1)
                     quant = quant.to(device=device, dtype=torch.bfloat16)
                     decoded_imgs.append(((rescale_magvit_output(magvit.decode(quant)))))
-                    decoded_depth.append(magvit2dpt.decode(quant))
+                    if magvit2dpt is not None:
+                        decoded_depth.append(magvit2dpt.decode(quant))
             if max_images and len(decoded_imgs) * batch_size >= max_images:
                 break
 
         decoded_imgs = [img.permute(1, 2, 0).numpy() for img in torch.cat(decoded_imgs)]
-        decoded_depth = transforms_f.resize(torch.cat(decoded_depth), decoded_imgs[0].shape[:-1])
-        decoded_depth = [depth.cpu().numpy() for depth in decoded_depth]
+        if magvit2dpt is not None:
+            decoded_depth = transforms_f.resize(torch.cat(decoded_depth), decoded_imgs[0].shape[:-1])
+            decoded_depth = [depth.cpu().numpy() for depth in decoded_depth]
         return decoded_imgs, decoded_depth
 
     return decode_latents
@@ -279,7 +284,7 @@ def draw_pcd(rgb_frames, depth_frames):
 
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-        ax.view_init(15, 0)
+        ax.view_init(25, -75)
         ax.scatter(world_pos[:,0], world_pos[:,1], world_pos[:,2], s=1, c=rgb)
         ax.proj_type = 'ortho'
         fig.canvas.draw()
@@ -344,10 +349,11 @@ def main():
                 grid_size=50,
             )
             video_frames = video_frames[:metadata["num_prompt_frames"]] + gtruth_track_frames
-    if args.draw_point_cloud and not args.track:
-        video_frames = draw_pcd(video_frames, depth_frames)
-    else:
-        video_frames = combine_rgb_depth(video_frames, depth_frames)
+    if args.depth_decoder_ckpt is not None:
+        if args.draw_point_cloud and not args.track:
+            video_frames = draw_pcd(video_frames, depth_frames)
+        else:
+            video_frames = combine_rgb_depth(video_frames, depth_frames)
     if is_generated_data:
         if video_tokens.shape[0] != metadata["window_size"] * 2 - metadata["num_prompt_frames"]:
             raise ValueError(f"Unexpected {video_tokens.shape=} given {metadata['window_size']=}, {metadata['num_prompt_frames']=}")
